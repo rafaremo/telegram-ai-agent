@@ -68,6 +68,9 @@ export class ChatAgent extends AIChatAgent<Env> {
 	// Store the last response for Telegram
 	private lastResponse: string = '';
 
+	// Limit stored messages to 100 (oldest are deleted after each turn)
+	maxPersistedMessages = 100;
+
 	async onChatMessage() {
 		const openai = createOpenAI({ apiKey: this.env.OPENAI_API_KEY });
 		const model = openai('gpt-5.4-mini');
@@ -146,6 +149,7 @@ export class ChatAgent extends AIChatAgent<Env> {
 					},
 				},
 			},
+			stopWhen: stepCountIs(5),
 		});
 
 		// For Telegram, we need to capture the full response text
@@ -174,91 +178,18 @@ export class ChatAgent extends AIChatAgent<Env> {
 
 	// Method to process a message and return the response (non-streaming, for Telegram)
 	async processMessage(message: string): Promise<string> {
-		const openai = createOpenAI({ apiKey: this.env.OPENAI_API_KEY });
-		const model = openai('gpt-5.4-mini');
-
-		// Convert existing messages to model format and add the new user message
-		const existingMessages = await convertToModelMessages(this.messages);
-		const messages = [
-			...existingMessages,
-			{ role: 'user' as const, content: message }
-		];
-
-		const result = streamText({
-			model,
-			system:
-				'You are a helpful and friendly AI assistant running on Telegram. You can help users with:\n' +
-				'- Answering questions and providing information\n' +
-				'- Checking the weather for any city\n' +
-				'- Performing calculations\n' +
-				'- Getting the current date and time\n\n' +
-				'Keep your responses concise (under 4000 characters) and friendly, suitable for a chat interface.',
-			messages: pruneMessages({
-				messages,
-				toolCalls: 'before-last-2-messages',
-			}),
-			tools: {
-				getWeather: {
-					description: 'Get the current weather for a city',
-					inputSchema: z.object({
-						city: z.string().describe('City name'),
-					}),
-					execute: async ({ city }: { city: string }) => {
-						const conditions = ['sunny ☀️', 'cloudy ☁️', 'rainy 🌧️', 'partly cloudy ⛅', 'clear ✨'];
-						const temp = Math.floor(Math.random() * 35) + 5;
-						return {
-							city,
-							temperature: temp,
-							condition: conditions[Math.floor(Math.random() * conditions.length)],
-							unit: 'celsius',
-						};
-					},
-				},
-
-				getCurrentTime: {
-					description: 'Get the current date and time',
-					inputSchema: z.object({}),
-					execute: async () => {
-						const now = new Date();
-						return {
-							date: now.toLocaleDateString(),
-							time: now.toLocaleTimeString(),
-							timestamp: now.toISOString(),
-						};
-					},
-				},
-
-				calculate: {
-					description: 'Perform a math calculation',
-					inputSchema: z.object({
-						a: z.number().describe('First number'),
-						b: z.number().describe('Second number'),
-						operator: z.enum(['+', '-', '*', '/', '%', '^']).describe('Arithmetic operator'),
-					}),
-					execute: async ({ a, b, operator }: { a: number; b: number; operator: string }) => {
-						const ops: Record<string, (x: number, y: number) => number> = {
-							'+': (x, y) => x + y,
-							'-': (x, y) => x - y,
-							'*': (x, y) => x * y,
-							'/': (x, y) => x / y,
-							'%': (x, y) => x % y,
-							'^': (x, y) => Math.pow(x, y),
-						};
-						if (operator === '/' && b === 0) {
-							return { error: 'Division by zero is not allowed' };
-						}
-						return {
-							expression: `${a} ${operator} ${b}`,
-							result: ops[operator](a, b),
-						};
-					},
-				},
-			},
-			stopWhen: stepCountIs(5),
+		// Add the new user message to the conversation history
+		this.messages.push({
+			id: crypto.randomUUID(),
+			role: 'user',
+			parts: [{ type: 'text', text: message }],
 		});
 
-		// Collect the stream and extract text content
-		const reader = result.toUIMessageStreamResponse().body?.getReader();
+		// Call onChatMessage to get the streaming response
+		const response = await this.onChatMessage();
+
+		// Read the stream and extract text content
+		const reader = response.body?.getReader();
 		if (!reader) {
 			throw new Error('Failed to get response stream');
 		}
@@ -266,22 +197,22 @@ export class ChatAgent extends AIChatAgent<Env> {
 		const decoder = new TextDecoder();
 		let buffer = '';
 		let finalText = '';
-		
+
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
-			
+
 			buffer += decoder.decode(value, { stream: true });
-			
+
 			// Process complete lines (SSE format)
 			const lines = buffer.split('\n');
 			buffer = lines.pop() || ''; // Keep incomplete line in buffer
-			
+
 			for (const line of lines) {
 				if (line.startsWith('data: ')) {
 					const data = line.slice(6).trim();
 					if (data === '[DONE]') continue;
-					
+
 					try {
 						const event = JSON.parse(data);
 						// Extract text-delta events
@@ -294,7 +225,7 @@ export class ChatAgent extends AIChatAgent<Env> {
 				}
 			}
 		}
-		
+
 		return finalText || 'No response generated';
 	}
 }
