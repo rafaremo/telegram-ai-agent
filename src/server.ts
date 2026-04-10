@@ -1,6 +1,6 @@
 import { AIChatAgent } from '@cloudflare/ai-chat';
 import { createOpenAI } from '@ai-sdk/openai';
-import { streamText, convertToModelMessages, pruneMessages, generateText } from 'ai';
+import { streamText, convertToModelMessages, pruneMessages, stepCountIs } from 'ai';
 import { z } from 'zod';
 
 // Telegram types
@@ -175,9 +175,16 @@ export class ChatAgent extends AIChatAgent<Env> {
 	// Method to process a message and return the response (non-streaming, for Telegram)
 	async processMessage(message: string): Promise<string> {
 		const openai = createOpenAI({ apiKey: this.env.OPENAI_API_KEY });
-		const model = openai('gpt-4o-mini');
+		const model = openai('gpt-5.4-mini');
 
-		const result = await generateText({
+		// Convert existing messages to model format and add the new user message
+		const existingMessages = await convertToModelMessages(this.messages);
+		const messages = [
+			...existingMessages,
+			{ role: 'user' as const, content: message }
+		];
+
+		const result = streamText({
 			model,
 			system:
 				'You are a helpful and friendly AI assistant running on Telegram. You can help users with:\n' +
@@ -187,7 +194,7 @@ export class ChatAgent extends AIChatAgent<Env> {
 				'- Getting the current date and time\n\n' +
 				'Keep your responses concise (under 4000 characters) and friendly, suitable for a chat interface.',
 			messages: pruneMessages({
-				messages: await convertToModelMessages(this.messages),
+				messages,
 				toolCalls: 'before-last-2-messages',
 			}),
 			tools: {
@@ -247,9 +254,48 @@ export class ChatAgent extends AIChatAgent<Env> {
 					},
 				},
 			},
+			stopWhen: stepCountIs(5),
 		});
 
-		return result.text;
+		// Collect the stream and extract text content
+		const reader = result.toUIMessageStreamResponse().body?.getReader();
+		if (!reader) {
+			throw new Error('Failed to get response stream');
+		}
+
+		const decoder = new TextDecoder();
+		let buffer = '';
+		let finalText = '';
+		
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			
+			buffer += decoder.decode(value, { stream: true });
+			
+			// Process complete lines (SSE format)
+			const lines = buffer.split('\n');
+			buffer = lines.pop() || ''; // Keep incomplete line in buffer
+			
+			for (const line of lines) {
+				if (line.startsWith('data: ')) {
+					const data = line.slice(6).trim();
+					if (data === '[DONE]') continue;
+					
+					try {
+						const event = JSON.parse(data);
+						// Extract text-delta events
+						if (event.type === 'text-delta' && event.delta) {
+							finalText += event.delta;
+						}
+					} catch {
+						// Ignore parse errors
+					}
+				}
+			}
+		}
+		
+		return finalText || 'No response generated';
 	}
 }
 

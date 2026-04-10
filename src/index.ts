@@ -117,10 +117,12 @@ async function processTelegramUpdate(update: TelegramUpdate, env: Env): Promise<
 			});
 		} catch (error) {
 			console.error("Error processing message:", error);
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			console.error("Error details:", errorMessage);
 			await sendTelegramMessage(
 				botToken,
 				chatId,
-				"Sorry, I encountered an error processing your message. Please try again.",
+				`Sorry, I encountered an error: ${errorMessage.slice(0, 100)}`,
 				{ reply_to_message_id: messageId }
 			);
 		}
