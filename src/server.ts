@@ -99,7 +99,6 @@ export class ChatAgent extends AIChatAgent<Env> {
 				'Mantén tus respuestas breves, amigables y adecuadas para Telegram.',
 			messages: pruneMessages({
 				messages: await convertToModelMessages(this.messages),
-				toolCalls: 'before-last-2-messages',
 			}),
 			tools: this.mcp.getAITools(),
 			stopWhen: stepCountIs(5),
@@ -179,7 +178,15 @@ export class ChatAgent extends AIChatAgent<Env> {
 			}
 		}
 
-		return finalText || 'No response generated';
+		const assistantText = finalText || 'No response generated';
+
+		this.messages.push({
+			id: crypto.randomUUID(),
+			role: 'assistant',
+			parts: [{ type: 'text', text: assistantText }],
+		});
+
+		return assistantText;
 	}
 }
 
